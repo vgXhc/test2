@@ -1,0 +1,224 @@
+---
+title: "Getting to work in Madison"
+description: |
+  Commute mode share by minority status and income
+author:
+  - name: Harald Kliems 
+    orcid_id: 0000-0003-2542-0047
+    url: https://datenecke.netlify.app/
+date: "`r Sys.Date()`"
+output: distill::distill_article
+---
+
+If you spend enough time attending public input meetings at a city, it is almost certain you will encounter statements like:
+
+> "We shouldn't make it harder to drive. Poor people need to drive to their jobs."
+
+> "Bike lanes are for wealthy white guys."
+
+> "People of color don't bike."
+
+I knew what the data on mode share look like at the national level, but I was always curious what the numbers would be for Madison. I have previously written about [commute mode share in Madison](https://www.madisonbikes.org/2020/09/biking-numbers-in-madison-not-so-great/), based on data from the American Community Survey (ACS). But while that data in principle contains all the information needed to look at mode share by income or race/ethnicity, what is publicly available on the ACS website doesn't lend itself to this type of analysis. Fortunately, there is another data source: CTPP. This stands for [Census Transportation Planning Products](https://ctpp.transportation.org/), "a State DOT-funded, cooperative program that produces special tabulations of American Community Survey (ACS) data that have enhanced value for transportation planning, analysis, and strategic direction." So same data source, but split up in a different way.<aside>I recommend reading my other article on bike mode share in Madison to get a sense of the limitations of ACS data.</aside>
+
+# Commuting and minority status
+The way CTPP treats race and ethnicity is by putting people into two categories: White people who aren't LatinX/Hispanic, and everyone else. There are all kinds of issues with splitting things up this way, but using a more fine-grained approach to race and ethnicity would lead to small groups in each category and less reliable data.
+
+```{r}
+library(tidyverse)
+library(CTPPr)
+library(hrbrthemes)
+
+minority_commute <- download_ctpp(
+  id = "B102201",
+  dataset = "2016",
+  geography = "City",
+  state = "Wisconsin",
+  output = "Name" #actual names
+)
+
+# fix columns names
+minority_commute <- minority_commute %>% 
+  rename("residence" = "RESIDENCE",
+         "minority_status" = "Minority Status 3",
+         "transpo_mode" = "Means of Transportation 11",
+         "estimate" = "Estimate") %>% 
+  mutate(minority_status = case_when(minority_status == "White alone, not Hispanic/Latino" ~ "non-Hispanic White",
+                                     minority_status == "Other" ~ "Racial/ethnic minority",
+                                     TRUE ~ minority_status))
+```
+
+
+```{r filter-to-madison}
+minority_commute_msn <- minority_commute %>% 
+  filter(residence == "Madison city, WI; Madison, WI Metro Area")
+```
+
+```{r}
+totals <- minority_commute_msn %>% 
+  filter(transpo_mode == "Total, means of transportation") %>% 
+  rename("total" = "estimate") %>% 
+  select(minority_status, total)
+
+minority_commute_msn <- minority_commute_msn %>% 
+  left_join(totals, by = "minority_status") %>% 
+  mutate(estimate_pct = estimate/total)
+```
+
+```{r}
+library(hrbrthemes)
+
+# collapsing infrequent modes
+minority_commute_msn_collapsed <- minority_commute_msn%>%
+  mutate(transpo_mode = fct_collapse(transpo_mode,
+                                     "Drove alone" = "Car, truck, or van -- Drove alone",
+                                     Bus = "Bus or trolley bus",
+                                     Biked = "Bicycle",
+                                     Carpooled = c("Car, truck, or van -- In a 2-person carpool",
+                                                 "Car, truck, or van -- In a 3-or-more person carpool"),
+                                     other = c("Railroad or ferryboat",
+                                               "Streetcar, trolley car, subway, or elevated",
+                                               "Taxicab, motorcycle or other method")))
+```
+```{r}
+minority_commute_msn_collapsed %>% 
+  filter(transpo_mode != "Total, means of transportation") %>%
+  filter(transpo_mode != "other") %>% 
+  filter(minority_status != "Total persons") %>% 
+  group_by(minority_status, transpo_mode) %>% 
+  summarize(pct = sum(estimate_pct)) %>% 
+  ggplot(aes(x = reorder(transpo_mode, pct), y = pct, color = minority_status)) +
+  geom_point(size = 3) +
+  #geom_text(data = . %>% filter(minority_status == "Total persons"), aes(label = round(pct, 2)*100), nudge_x = 0.3) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_color_brewer(type = "qual",
+                     palette = "Set2") +
+  labs(x = element_blank(),
+       y = "Commute mode share", 
+       title = "Madison commute mode share by minority status",
+       color = "Minority status")+
+  #facet_wrap(~minority_status) +
+  coord_flip() +
+  theme_ft_rc() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+This is the same data but in a table.
+
+```{r}
+library(kableExtra)
+library(scales)
+minority_commute_msn_collapsed %>% 
+  group_by(minority_status, transpo_mode) %>% 
+  summarize(pct = sum(estimate_pct)) %>% 
+  pivot_wider(names_from = minority_status, values_from = pct) %>% 
+  mutate(diff = `non-Hispanic White` - `Racial/ethnic minority`) %>% 
+  filter(transpo_mode != "Total, means of transportation") %>% 
+  arrange(desc(abs(diff))) %>% 
+  #mutate(diff = cell_spec(diff, color = spec_color(diff))) %>% 
+  mutate(across(2:5, ~ percent(.x, accuracy = 0.1))) %>%
+  kbl(col.names = c("Commute mode", "Non-Hispanic White", "Racial/ethnic minority", "Total", "Difference"), escape = F) %>% 
+  kable_material_dark(full_width = F)
+```
+
+The rightmost column shows the difference in percentage points between the two population groups (i.e. the distance between the two dots on the previous plot). That difference is largest for driving to work alone: The rate of driving alone is almost 10 percentage points higher for non-Hispanic White commuters. Depending on what question we're trying to answer, it may be more useful to put this difference in the context of overall commute rates. Yes, there is a large difference in driving alone rates, but it also the overall most common commute mode. Compare that to bus commuters: The rate of bus commuting for people belonging to a racial or ethnic minority is _twice as high_ as that for non-Hispanic White commuters, 15.4% versus 7.7%. With the difference in the reverse direction, the rate of bike commuters and people working from home is close to twice as high for non-Hispanic White workers. The only mode where rates are more or less the same for both groups is walking to work, at around 10 percent.
+
+# Income
+A different way to look at commute mode is by household income. Of course, income and race/ethnicity are not independent of each other. But especially with the coarse distinction between non-Hispanic White versus everyone else, some of that correlation is blurred out. 
+
+```{r}
+income_commute <- download_ctpp(
+  id = "B103203",
+  dataset = "2016",
+  geography = "City",
+  state = "Wisconsin",
+  output = "Name" #actual names
+)
+```
+
+```{r}
+
+income_commute <- income_commute %>% 
+  rename("residence" = "RESIDENCE",
+         "hh_income" = "Household Income in the Past 12 Months 2016 26",
+         "transpo_mode" = "Means of Transportation 11",
+         "estimate" = "Estimate") %>% 
+  mutate(hh_income = ifelse(hh_income == "Total, household income", "Total", hh_income)) %>% 
+  mutate(hh_income = factor(hh_income, unique(hh_income)))
+```
+
+```{r}
+income_commute_msn <- income_commute %>% 
+  filter(residence == "Madison city, WI; Madison, WI Metro Area")
+```
+
+```{r}
+income_commute_msn %>% 
+  ggplot(aes(hh_income, estimate, fill = transpo_mode)) +
+  geom_col(position = "fill") +
+  coord_flip()
+```
+
+```{r}
+income_commute_msn %>% 
+  mutate(hh_income = fct_collapse(hh_income,
+                                  "< $15k" = c("Less than $5,000",
+                                               "$ 5,000-$ 9,999",
+                                               "$10,000-$12,499",
+                                               "$12,500-$14,999"),
+                                  "$15-25k" = c("$15,000-$17,499",
+                                                "$17,500-$19,999",
+                                                "$20,000-$22,499",
+                                                "$22,500-$24,999"),
+                                  "$25-50k" = c("$25,000-$27,499",
+                                                "$27,500-$29,999",
+                                                "$30,000-$32,499",
+                                                "$32,500-$34,999",
+                                                "$35,000-$37,499",
+                                                "$37,500-$39,999",
+                                                "$40,000-$42,499",
+                                                "$42,500-$44,999",
+                                                "$45,000-$47,499",
+                                                "$47,500-$49,999"),
+                                  "$50-75k" = c("$50,000-$54,999",
+                                                "$55,000-$59,999",
+                                                "$60,000-$74,999"),
+                                  "$75-100k" = c("$75,000-$99,999"),
+                                  "$100-125k" = c("$100,000-$124,999"),
+                                  "$125-150k" = c("$125,000-$149,999"),
+                                  ">$150k" = c("$150,000 or more"))) %>% 
+  mutate(transpo_mode = fct_collapse(transpo_mode,
+                                     "Drove alone" = "Car, truck, or van -- Drove alone",
+                                     Bus = "Bus or trolley bus",
+                                     Biked = "Bicycle",
+                                     Carpooled = c("Car, truck, or van -- In a 2-person carpool",
+                                                 "Car, truck, or van -- In a 3-or-more person carpool"),
+                                     other = c("Railroad or ferryboat",
+                                               "Streetcar, trolley car, subway, or elevated",
+                                               "Taxicab, motorcycle or other method"))) %>%
+  filter(!(transpo_mode %in% c("Total, means of transportation",
+                               "other"))) %>% 
+  group_by(hh_income, transpo_mode) %>% 
+  summarize(estimate = sum(estimate)) %>% 
+  mutate(transpo_mode = reorder(transpo_mode, estimate),
+         transpo_mode = fct_relevel(transpo_mode, "Carpooled", after = 4)) %>% #move drove alone and carpooled next to each other
+  ggplot(aes(hh_income, estimate, fill = transpo_mode)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_brewer(type = "qual",
+                     palette = "Set3") +
+  labs(x = element_blank(),
+       y = "Commute mode share", 
+       title = "Madison commute mode share by household income",
+       fill = "Commute mode",
+       caption = "Data: Census Transportation Planning Products 2012-16 
+               Visualization: Harald Kliems")+
+  #facet_wrap(~minority_status) +
+  coord_flip() +
+  theme_ft_rc() +
+  theme(panel.grid.major.y = element_blank())
+```
+For most commute modes, there is a clear trend across income groups: The more you make, the more likely you are to drive alone, and the less likely you are to walk or take the bus to work. It's a little more complicated for other modes:
+
+- Biking is most common for people in low-income households and then drops for with increasing income. However, at the top of the scale, in households with an income over $150,000, the rate goes up again.
+- The inverse is true for working from home: The rate is highest at the highest incomes and then drops with lower income. But for people in households making less than $15,000, it goes up again.
+- Finally, for carpooling there doesn't seem to be a clear trend. Between \$15,000 and \$100,000 household income, the rates are more or less the same. Very low income household don't carpool much; and for some reason, incomes between \$125,000 and \$150,000 have the highest rate of carpooling.
